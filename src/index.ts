@@ -4,6 +4,7 @@ import { z } from "zod";
 
 type UnifiEnv = {
 	UNIFI_API_KEY: string;
+	UNIFI_CONSOLE_ID: string;
 };
 
 const SITE_MANAGER_API = "https://api.ui.com";
@@ -42,7 +43,6 @@ async function unifiRequest(
 	});
 
 	const text = await response.text();
-
 	let data: unknown;
 
 	try {
@@ -53,7 +53,9 @@ async function unifiRequest(
 
 	if (!response.ok) {
 		throw new Error(
-			`UniFi API ${response.status}: ${typeof data === "string" ? data : JSON.stringify(data)}`,
+			`UniFi API ${response.status}: ${
+				typeof data === "string" ? data : JSON.stringify(data)
+			}`,
 		);
 	}
 
@@ -64,35 +66,23 @@ async function unifiSiteManagerGet(
 	env: UnifiEnv,
 	path: string,
 ): Promise<unknown> {
-	return unifiRequest(
-		env,
-		SITE_MANAGER_API,
-		path,
-		"GET",
-	);
+	return unifiRequest(env, SITE_MANAGER_API, path, "GET");
 }
 
-/*
- * UniFi Network Integration API
- *
- * Remote API format:
- *
- * https://api.ui.com/v1/connector/consoles/{consoleId}/proxy/network/integration
- *
- * Network endpoints are then appended as:
- *
- * /v1/sites
- * /v1/sites/{siteId}/devices
- * etc.
- */
-function networkApiBase(consoleId: string): string {
-	return `${SITE_MANAGER_API}/v1/connector/consoles/${encodeURIComponent(consoleId)}/proxy/network/integration`;
+function networkApiBase(env: UnifiEnv): string {
+	if (!env.UNIFI_CONSOLE_ID) {
+		throw new Error("UNIFI_CONSOLE_ID secret is not configured");
+	}
+
+	return `${SITE_MANAGER_API}/v1/connector/consoles/${encodeURIComponent(
+		env.UNIFI_CONSOLE_ID,
+	)}/proxy/network/integration`;
 }
 
 function createServer(env: UnifiEnv) {
 	const server = new McpServer({
 		name: "UniFi Network",
-		version: "2.0.0",
+		version: "2.1.0",
 	});
 
 	// ============================================================
@@ -224,17 +214,15 @@ function createServer(env: UnifiEnv) {
 			description: `
 Execute an authenticated request against the official UniFi Network Integration API.
 
-This provides full read/write access to the Network application through the
-UniFi Cloud Connector.
+The UniFi console is configured internally by the Worker.
+Claude does not need to provide a console ID.
 
 Supported HTTP methods:
 GET, POST, PUT, PATCH, DELETE
 
-The path must start with /v1/ and is relative to:
-https://api.ui.com/v1/connector/consoles/{consoleId}/proxy/network/integration
+The path must start with /v1/ and is relative to the configured UniFi console.
 
 Examples:
-
 GET /v1/sites
 GET /v1/sites/{siteId}/devices
 GET /v1/sites/{siteId}/clients
@@ -253,11 +241,10 @@ DELETE /v1/sites/{siteId}/wifi-broadcasts/{wifiId}
 Use the official UniFi Network API semantics for the request body.
 
 This tool has real write access. Destructive operations such as DELETE,
-device restart, configuration changes, firewall changes, VLAN changes and
-SSID changes are executed against the UniFi controller.
+device restart, configuration changes, firewall changes, VLAN changes
+and SSID changes are executed against the UniFi controller.
 `,
 			inputSchema: {
-				consoleId: z.string().min(1),
 				method: z.enum([
 					"GET",
 					"POST",
@@ -272,10 +259,10 @@ SSID changes are executed against the UniFi controller.
 				body: z.unknown().optional(),
 			},
 		},
-		async ({ consoleId, method, path, body }) => {
+		async ({ method, path, body }) => {
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -295,22 +282,18 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"Execute an action on an adopted UniFi device. Supported actions depend on the device and API version, including RESTART and LOCATE.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				deviceId: z.string().min(1),
 				action: z.string().min(1),
 			},
 		},
-		async ({
-			consoleId,
-			siteId,
-			deviceId,
-			action,
-		}) => {
+		async ({ siteId, deviceId, action }) => {
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
-				`/v1/sites/${encodeURIComponent(siteId)}/devices/${encodeURIComponent(deviceId)}/actions`,
+				networkApiBase(env),
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/devices/${encodeURIComponent(deviceId)}/actions`,
 				"POST",
 				{ action },
 			);
@@ -325,7 +308,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"Execute an action on a UniFi switch port, such as POWER_CYCLE or other actions supported by the installed Network API version.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				deviceId: z.string().min(1),
 				portIndex: z.number().int().min(1),
@@ -333,7 +315,6 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			deviceId,
 			portIndex,
@@ -341,8 +322,12 @@ SSID changes are executed against the UniFi controller.
 		}) => {
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
-				`/v1/sites/${encodeURIComponent(siteId)}/devices/${encodeURIComponent(deviceId)}/interfaces/ports/${portIndex}/actions`,
+				networkApiBase(env),
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/devices/${encodeURIComponent(
+					deviceId,
+				)}/interfaces/ports/${portIndex}/actions`,
 				"POST",
 				{ action },
 			);
@@ -357,19 +342,14 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"Adopt a pending UniFi device into a UniFi site.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				mac: z.string().min(1),
 				siteId: z.string().min(1),
 			},
 		},
-		async ({
-			consoleId,
-			mac,
-			siteId,
-		}) => {
+		async ({ mac, siteId }) => {
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				"/v1/pending-devices",
 				"POST",
 				{
@@ -388,20 +368,17 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"Remove/unadopt an adopted UniFi device from a site.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				deviceId: z.string().min(1),
 			},
 		},
-		async ({
-			consoleId,
-			siteId,
-			deviceId,
-		}) => {
+		async ({ siteId, deviceId }) => {
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
-				`/v1/sites/${encodeURIComponent(siteId)}/devices/${encodeURIComponent(deviceId)}`,
+				networkApiBase(env),
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/devices/${encodeURIComponent(deviceId)}`,
 				"DELETE",
 			);
 
@@ -419,7 +396,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"Execute an action on a UniFi client using the official Network API.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				clientId: z.string().min(1),
 				action: z.string().min(1),
@@ -427,7 +403,6 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			clientId,
 			action,
@@ -440,8 +415,12 @@ SSID changes are executed against the UniFi controller.
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
-				`/v1/sites/${encodeURIComponent(siteId)}/clients/${encodeURIComponent(clientId)}/actions`,
+				networkApiBase(env),
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/clients/${encodeURIComponent(
+					clientId,
+				)}/actions`,
 				"POST",
 				body,
 			);
@@ -460,7 +439,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"List, create, update, get or delete UniFi networks/VLANs.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				method: z.enum([
 					"GET",
@@ -474,7 +452,6 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			method,
 			networkId,
@@ -488,7 +465,7 @@ SSID changes are executed against the UniFi controller.
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -504,7 +481,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"List, create, update, get or delete UniFi Wi-Fi broadcasts/SSIDs.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				method: z.enum([
 					"GET",
@@ -518,21 +494,22 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			method,
 			wifiId,
 			body,
 		}) => {
 			const path =
-				`/v1/sites/${encodeURIComponent(siteId)}/wifi-broadcasts` +
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/wifi-broadcasts` +
 				(wifiId
 					? `/${encodeURIComponent(wifiId)}`
 					: "");
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -548,7 +525,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"List, create, update, get or delete custom UniFi firewall zones.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				method: z.enum([
 					"GET",
@@ -562,21 +538,22 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			method,
 			zoneId,
 			body,
 		}) => {
 			const path =
-				`/v1/sites/${encodeURIComponent(siteId)}/firewall/zones` +
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/firewall/zones` +
 				(zoneId
 					? `/${encodeURIComponent(zoneId)}`
 					: "");
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -592,7 +569,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"List, create, update, get or delete UniFi Access Control List rules.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				method: z.enum([
 					"GET",
@@ -606,21 +582,22 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			method,
 			ruleId,
 			body,
 		}) => {
 			const path =
-				`/v1/sites/${encodeURIComponent(siteId)}/acl-rules` +
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/acl-rules` +
 				(ruleId
 					? `/${encodeURIComponent(ruleId)}`
 					: "");
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -636,7 +613,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"List, create, update, get or delete UniFi Traffic Matching Lists.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				method: z.enum([
 					"GET",
@@ -650,21 +626,22 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			method,
 			listId,
 			body,
 		}) => {
 			const path =
-				`/v1/sites/${encodeURIComponent(siteId)}/traffic-matching-lists` +
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/traffic-matching-lists` +
 				(listId
 					? `/${encodeURIComponent(listId)}`
 					: "");
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -684,7 +661,6 @@ SSID changes are executed against the UniFi controller.
 			description:
 				"Manage UniFi Hotspot vouchers. Supports listing, getting, generating and deleting vouchers.",
 			inputSchema: {
-				consoleId: z.string().min(1),
 				siteId: z.string().min(1),
 				method: z.enum([
 					"GET",
@@ -696,21 +672,22 @@ SSID changes are executed against the UniFi controller.
 			},
 		},
 		async ({
-			consoleId,
 			siteId,
 			method,
 			voucherId,
 			body,
 		}) => {
 			const path =
-				`/v1/sites/${encodeURIComponent(siteId)}/hotspot/vouchers` +
+				`/v1/sites/${encodeURIComponent(
+					siteId,
+				)}/hotspot/vouchers` +
 				(voucherId
 					? `/${encodeURIComponent(voucherId)}`
 					: "");
 
 			const result = await unifiRequest(
 				env,
-				networkApiBase(consoleId),
+				networkApiBase(env),
 				path,
 				method,
 				body,
@@ -724,7 +701,11 @@ SSID changes are executed against the UniFi controller.
 }
 
 export default {
-	fetch(request: Request, env: UnifiEnv, ctx: ExecutionContext) {
+	fetch(
+		request: Request,
+		env: UnifiEnv,
+		ctx: ExecutionContext,
+	) {
 		return createMcpHandler(
 			() => createServer(env),
 		)(request, env, ctx);
